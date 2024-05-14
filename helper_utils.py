@@ -1,69 +1,59 @@
-from langchain.text_splitter import RecursiveCharacterTextSplitter, SentenceTransformersTokenTextSplitter
 import numpy as np
-from pypdf import PdfReader
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
-
+from langchain_core.runnables import RunnableParallel
 from langchain_community.document_loaders import PyPDFLoader
 from tqdm import tqdm
+from langchain.retrievers import ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import CrossEncoderReranker
+from langchain_community.cross_encoders import HuggingFaceCrossEncoder
+from langchain_community.retrievers import BM25Retriever
+from langchain.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_openai import ChatOpenAI
+from operator import itemgetter
+from langchain.retrievers import EnsembleRetriever
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader
 import os
-
-
-def _read_pdf(filename):
-    reader = PdfReader(filename)
     
-    pdf_texts = [p.extract_text().strip() for p in reader.pages]
-
-    # Filter the empty strings
-    pdf_texts = [text for text in pdf_texts if text]
-    return pdf_texts
-
-
-def _chunk_texts(texts):
+def process_pdf_batch(pdf_file):
+    loader = PyPDFLoader(pdf_file)
+    pages = loader.load_and_split()
     character_splitter = RecursiveCharacterTextSplitter(
-        separators=["\n\n", "\n", ". ", " ", ""],
         chunk_size=1000,
         chunk_overlap=0
+        )
+    pages = character_splitter.split_documents(pages)
+    return pages
+
+def generate_queries():
+        
+    # Multi Query: Different Perspectives
+    template = """You are an AI language model assistant. Your task is to generate Four 
+    different versions of the given user question to retrieve relevant documents from a vector 
+    database. By generating multiple perspectives on the user question, your goal is to help
+    the user overcome some of the limitations of the distance-based similarity search. 
+    Provide these alternative questions separated by newlines. Original question: {question}"""
+    prompt_perspectives = ChatPromptTemplate.from_template(template)
+
+
+    generate_querie = (
+        prompt_perspectives 
+        | ChatOpenAI(temperature=0) 
+        | StrOutputParser() 
+        | (lambda x: x.split("\n"))
     )
-    character_split_texts = character_splitter.split_text('\n\n'.join(texts))
+    return generate_querie 
 
-    token_splitter = SentenceTransformersTokenTextSplitter(chunk_overlap=0, tokens_per_chunk=256)
 
-    token_split_texts = []
-    for text in character_split_texts:
-        token_split_texts += token_splitter.split_text(text)
+def _get_docs(m):
+    docs=[]
+    docs.extend(m['original'])
+    for i in m['new']:
+        docs.extend(i)
+    return docs
 
-    return token_split_texts
-
-def process_pdf_batch(pdf_files):
-    batch_docs = []
-    for pdf_file_path in pdf_files:
-        temp_file = pdf_file_path.name
-        with open(temp_file, "wb") as file:
-            file.write(pdf_file_path.getvalue())
-        loader = PyPDFLoader(temp_file)
-        pages = loader.load_and_split()
-        character_splitter = RecursiveCharacterTextSplitter(
-            separators=["\n\n", "\n", ". ", " ", ""],
-             chunk_size=1000,
-            chunk_overlap=0
-            )
-        pages = character_splitter.split_documents(pages)
-        os.remove(temp_file)
-        batch_docs.extend(pages)
-    return batch_docs
-
-def load_faiss(filename):
-    texts = _read_pdf(filename)
-    chunks = _chunk_texts(texts)
-
-    if os.path.exists(f"my_index"):
-        document_in_faiss.load_local(f"my_index")
-    else:
-        document_in_faiss = FAISS.from_documents(chunks, OpenAIEmbeddings())
-        document_in_faiss.save_local(f"my_index")
-
-    return document_in_faiss
 
 
 def word_wrap(string, n_chars=72):
@@ -79,3 +69,59 @@ def project_embeddings(embeddings, umap_transform):
     for i, embedding in enumerate(tqdm(embeddings)): 
         umap_embeddings[i] = umap_transform.transform([embedding])
     return umap_embeddings
+
+def keyword_extractor():
+    prompt="""
+    You are an AI language model assistant. Your task is to help the user retrieve keywords from their query. 
+
+    Please provide me with the keywords you would like to extract from your query. 
+
+    Keywords: {keywords}
+    """
+    prompt_perspectives=ChatPromptTemplate.from_template(prompt)
+    generate_querie = (
+        prompt_perspectives 
+        | ChatOpenAI(temperature=0) 
+        | StrOutputParser() )
+    return generate_querie
+
+def main(Query):
+    d="resume"
+    chunks=process_pdf_batch(f"data\{d}.pdf")
+    document_in_faiss=FAISS.load_local("faiss_index", OpenAIEmbeddings(),allow_dangerous_deserialization=True)
+    faiss_retriever=document_in_faiss.as_retriever(search_kwargs={'k': 10})
+
+    original_question= faiss_retriever
+    retrieval_chain =  generate_queries() | faiss_retriever.map()
+    map_chain = RunnableParallel(original=original_question,new=retrieval_chain) | _get_docs
+
+    Bm25_retriever = BM25Retriever.from_documents(chunks)
+    Bm25_retriever.k = 10
+
+    ensemble_retriever = EnsembleRetriever(
+    retrievers=[Bm25_retriever, map_chain], weights=[0.5, 0.5]
+    )
+
+    model = HuggingFaceCrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
+    compressor = CrossEncoderReranker(model=model, top_n=4)
+    compression_retriever = ContextualCompressionRetriever(
+        base_compressor=compressor, base_retriever=ensemble_retriever
+    )
+
+    final_prompt="""You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know. Use three sentences maximum and keep the answer concise.
+        Question: {question} 
+        Context: {context} 
+        Answer:"""
+
+    final_prompt_perspectives=ChatPromptTemplate.from_template(final_prompt)
+
+    llm_chain2=({"context": itemgetter("query") | compression_retriever,
+              "question":itemgetter("query")}
+             | final_prompt_perspectives
+             | ChatOpenAI(temperature=0) | StrOutputParser() )
+    
+    return llm_chain2.invoke({"query":Query})
+
+if __name__=="__main__":
+    d=main("What are all the education qualification of shyam?")
+    print(d)
