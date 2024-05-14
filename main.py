@@ -1,7 +1,7 @@
 import streamlit as st
 from helper_utils import main
 
-st.title("Echo Bot")
+st.title("ChatBot")
 
 # Initialize chat history
 if "messages" not in st.session_state:
@@ -19,7 +19,7 @@ if prompt := st.chat_input("Lets have a chat with our document"):
     # Add user message to chat history
     st.session_state.messages.append({"role": "user", "content": prompt})
     answer=main(prompt)
-    response = f"Response: {answer}"
+    response = f"{answer}"
     # Display assistant response in chat message container
     with st.chat_message("assistant"):
         st.markdown(response)
