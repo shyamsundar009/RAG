@@ -8,3 +8,7 @@ pypdf
 sentence-transformers
 langchain-openai
 rank_bm25
+chromadb
+tqdm
+tiktoken
+umap-learn

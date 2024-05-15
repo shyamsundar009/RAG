@@ -16,6 +16,10 @@ from langchain.retrievers import EnsembleRetriever
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
     
 def process_pdf_batch(pdf_file):
     loader = PyPDFLoader(pdf_file)
@@ -88,6 +92,8 @@ def keyword_extractor():
 def main(Query):
     d="resume"
     chunks=process_pdf_batch(f"data\{d}.pdf")
+    s=FAISS.from_documents(chunks, OpenAIEmbeddings())
+    s.save_local("faiss_index")
     document_in_faiss=FAISS.load_local("faiss_index", OpenAIEmbeddings(),allow_dangerous_deserialization=True)
     faiss_retriever=document_in_faiss.as_retriever(search_kwargs={'k': 10})
 
