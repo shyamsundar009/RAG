@@ -12,3 +12,4 @@ chromadb
 tqdm
 tiktoken
 umap-learn
+matplotlib
